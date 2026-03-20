@@ -170,14 +170,26 @@ async def _notify_manual_position(symbol: str, pos: dict, is_addon: bool):
 
 async def _notify_position_closed(symbol: str):
     """청산 콜백 — Bybit에서 closed PnL 조회 후 전송"""
+    import time
     client = get_exchange_client()
     payload: dict = {"symbol": symbol}
     pnl_info = None
+    detected_at_ms = int(time.time() * 1000)  # 포지션 청산 감지 시각
+
     for attempt in range(4):
         try:
-            pnl_info = await client.get_closed_pnl(symbol)
-            if pnl_info:
-                break
+            candidate = await client.get_closed_pnl(symbol)
+            if candidate:
+                created_time = int(candidate.get("createdTime", 0))
+                # 감지 시각 기준 60초 이내 데이터만 유효로 판단 (stale 데이터 제거)
+                if created_time > detected_at_ms - 60_000:
+                    pnl_info = candidate
+                    break
+                else:
+                    logger.warning(
+                        f"[ManualDetect] stale pnl data skipped: createdTime={created_time}, "
+                        f"detected_at={detected_at_ms}"
+                    )
         except Exception as e:
             logger.warning(f"[ManualDetect] closed_pnl 조회 실패 (attempt {attempt + 1}): {e}")
         if attempt < 3:
@@ -198,6 +210,17 @@ async def _notify_position_heartbeat(symbol: str, pos: dict):
         "unrealized_pnl": str(pos.get("unrealizedPnl") or "0"),
     }
     await _post_to_central("/api/agent/position-heartbeat", payload)
+
+
+async def _notify_tp_filled(symbol: str, pos: dict, prev_qty: float, curr_qty: float):
+    """TP 부분 체결 콜백"""
+    payload = {
+        "symbol": symbol,
+        "mark_price": str(pos.get("markPrice") or pos.get("entryPrice") or "0"),
+        "qty_closed": str(round(prev_qty - curr_qty, 9)),
+        "remaining_qty": str(curr_qty),
+    }
+    await _post_to_central("/api/agent/tp-filled", payload)
 
 
 async def detect_manual_positions():
@@ -248,6 +271,13 @@ async def detect_manual_positions():
                                 f"qty {prev_qty} → {curr_qty}"
                             )
                             await _notify_manual_position(symbol, pos, is_addon=True)
+                    elif curr_qty < prev_qty - 1e-9:
+                        # qty 감소 + 포지션 존재 → TP 부분 체결
+                        logger.info(
+                            f"[ManualDetect] TP 부분 체결 감지: {symbol} "
+                            f"qty {prev_qty} → {curr_qty}"
+                        )
+                        await _notify_tp_filled(symbol, pos, prev_qty, curr_qty)
 
                     # MAE/MFE heartbeat (보유 중 포지션마다 30초마다 전송)
                     await _notify_position_heartbeat(symbol, pos)
