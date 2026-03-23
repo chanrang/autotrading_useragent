@@ -533,7 +533,7 @@ class AgentExchangeClient:
                 }
 
             elif self.exchange_id == "bitget":
-                result = await self.exchange.private_get_api_v2_mix_position_history_position({
+                result = await self.exchange.private_mix_get_v2_mix_position_history_position({
                     "symbol": symbol,
                     "productType": "USDT-FUTURES",
                     "limit": limit,
